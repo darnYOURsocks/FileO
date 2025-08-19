@@ -1,226 +1,139 @@
-# app.py — Streamlit app for Gray–Scott "duality" patterns (mobile-friendly submit)
+
+# app.py — Streamlit UI for deeper, more "real" functions
 import streamlit as st
 import numpy as np
-import re
 import matplotlib.pyplot as plt
-import io
-import json
+import io, json, re
 
-# ========== 1) Pattern detection ==========
+from sim_models import run_model, gs_preset, gm_preset, fhn_preset
+from pattern_analytics import classify_pattern, ensemble_label, local_sensitivity_gray_scott, phase_scan_gray_scott, render_phase_heatmap
+
 def detect_duality(text: str):
-    """Find 'between X and Y' (case-insensitive)."""
-    match = re.search(r"\bbetween\s+(.+?)\s+and\s+(.+?)([\.!\?]|$)", text, re.IGNORECASE)
-    if match:
-        return (match.group(1).strip(), match.group(2).strip())
-    return None
+    m = re.search(r"\bbetween\s+(.+?)\s+and\s+(.+?)([\.!\?]|$)", text, re.IGNORECASE)
+    return (m.group(1).strip(), m.group(2).strip()) if m else None
 
-# ========== 2) Sim parameters (presets) ==========
-def stripe_params(size=128, dt=1.0):
-    # Classic Gray–Scott "stripe-ish" regime
-    return dict(Du=0.16, Dv=0.08, F=0.035, k=0.060, dt=dt, size=size)
-
-def spot_params(size=128, dt=1.0):
-    # "Spots" regime
-    p = stripe_params(size=size, dt=dt)
-    p["F"] = 0.022
-    p["k"] = 0.051
-    return p
-
-# ========== 3) Simulation core (NumPy) ==========
-def laplacian(Z):
-    """5‑point Laplacian on a torus via roll (periodic BC)."""
-    return (
-        np.roll(Z, 1, axis=0) + np.roll(Z, -1, axis=0) +
-        np.roll(Z, 1, axis=1) + np.roll(Z, -1, axis=1) - 4.0 * Z
-    )
-
-def initialize_grids(N, rng=None):
-    """Start U≈1, V≈0 with a noisy disk seed at center."""
-    rng = rng or np.random.default_rng()
-    U = np.ones((N, N), dtype=np.float32)
-    V = np.zeros((N, N), dtype=np.float32)
-
-    r = max(3, N // 6)
-    cx = N // 2
-    cy = N // 2
-    y, x = np.ogrid[-r:r+1, -r:r+1]
-    mask = x * x + y * y <= r * r
-    U[cx - r:cx + r + 1, cy - r:cy + r + 1][mask] = 0.5 + 0.1 * rng.random(mask.sum())
-    V[cx - r:cx + r + 1, cy - r:cy + r + 1][mask] = 0.25 + 0.1 * rng.random(mask.sum())
-    U += 0.02 * (rng.random((N, N)) - 0.5)
-    V += 0.02 * (rng.random((N, N)) - 0.5)
-    np.clip(U, 0.0, 1.0, out=U)
-    np.clip(V, 0.0, 1.0, out=V)
-    return U, V
-
-def step_gray_scott(U, V, Du, Dv, F, k, dt):
-    Lu = laplacian(U)
-    Lv = laplacian(V)
-    uvv = U * V * V
-    U += (Du * Lu - uvv + F * (1.0 - U)) * dt
-    V += (Dv * Lv + uvv - (F + k) * V) * dt
-    np.clip(U, 0.0, 1.0, out=U)
-    np.clip(V, 0.0, 1.0, out=V)
-
-def simulate(params, steps, progress_cb=None, render_every=100, throttle_ms=0):
-    N = params["size"]
-    U, V = initialize_grids(N)
-    Du, Dv, F, k, dt = params["Du"], params["Dv"], params["F"], params["k"], params["dt"]
-    for i in range(steps):
-        step_gray_scott(U, V, Du, Dv, F, k, dt)
-        if progress_cb and (i % render_every == 0 or i == steps - 1):
-            progress_cb(i + 1, steps, V)
-        if throttle_ms:
-            import time
-            time.sleep(throttle_ms / 1000.0)
-    return U, V
-
-# ========== 4) Tiny FFT pattern classifier (optional label) ==========
-def classify_pattern(V):
-    Fmag = np.fft.fftshift(np.abs(np.fft.fft2(V)))
-    Fmag = Fmag / (Fmag.max() + 1e-8)
-    N = Fmag.shape[0]
-    cy = cx = N // 2
-    y, x = np.indices(Fmag.shape)
-    r = np.sqrt((x - cx) ** 2 + (y - cy) ** 2).astype(np.int32)
-    radial = np.bincount(r.ravel(), Fmag.ravel(), minlength=r.max() + 1)
-    counts = np.bincount(r.ravel(), minlength=r.max() + 1) + 1e-8
-    radial /= counts
-    ring_peak = radial[3:].max() if radial.size > 3 else 0.0
-
-    thresh = 0.5
-    yy, xx = np.where(Fmag > thresh)
-    if yy.size:
-        ang = np.arctan2(yy - cy, xx - cx)
-        bins = np.histogram(ang, bins=30, range=(-np.pi, np.pi))[0]
-        orient_peak = bins.max() / (bins.sum() + 1e-8)
-    else:
-        orient_peak = 0.0
-
-    if orient_peak > 0.2 and ring_peak < 0.15:
-        return "stripes"
-    if ring_peak > 0.22:
-        return "spots"
-    return "labyrinth"
-
-# ========== 5) TREE response ==========
-def tree_response(duality, params, label):
+def tree_response(duality, model, params, label, confidence=None):
     a, b = duality
-    return {
-        "translation": f"The tension between '{a}' and '{b}' can stabilise into structure — here it looks like **{label}**.",
-        "recommendation": f"Alternate deep blocks for '{a}' and '{b}' to discover a rhythm rather than a tug-of-war.",
-        "explanation": f"Simulated with Gray–Scott. Feed (F={params['F']}) and kill (k={params['k']}) steer the regime.",
-        "experiment": f"For one week, log when you lean into '{a}' vs '{b}'. Adjust block length to stabilise energy.",
-    }
+    conf_txt = f" (confidence {confidence:.0%})" if confidence is not None else ""
+    translation = f"The tension between '{a}' and '{b}' produced **{label}**{conf_txt} using **{model.replace('_',' ')}** dynamics."
+    recommendation = f"Alternate focused blocks for '{a}' and '{b}' until your energy stabilises; tweak parameters if outcomes feel off."
+    explanation = f"We simulated {model.replace('_',' ')}; key knobs: " + ", ".join([k for k in params.keys() if k in ('F','k','a','b','Du','Dv')])
+    experiment = f"Log a week of cycles. If small changes flip patterns, you're near a bifurcation — adjust cadence gently."
+    return dict(translation=translation, recommendation=recommendation, explanation=explanation, experiment=experiment)
 
-# ========== 6) Streamlit UI (mobile‑friendly) ==========
-st.set_page_config(page_title="Duality Pattern Simulator", page_icon="🌊", layout="wide")
+st.set_page_config(page_title="Duality Patterns — Deeper", page_icon="🧪", layout="wide")
+st.title("🧪 Duality Pattern Lab (Deeper, No Cheating)")
+st.caption("Real PDEs, measured patterns, ensembles & sensitivity.")
 
-st.title("🌊 Duality Pattern Simulator (Gray–Scott)")
-st.caption("Type a sentence like “I feel torn between ambition and rest.” — then tap **Run Simulation**.")
+left, right = st.columns([1,1])
 
-# Inputs (left) · Results (right)
-colL, colR = st.columns([1, 1])
-
-with colL:
+with left:
     st.subheader("Input")
-    examples = [
-        "I feel torn between ambition and rest.",
-        "Between being social and needing solitude.",
-        "Caught between tradition and innovation.",
-        "Between perfectionism and acceptance.",
-        "Struggling between independence and connection.",
-    ]
-    ex_choice = st.selectbox("Try an example (optional)", ["—"] + examples, index=0)
+    default_text = "I feel torn between ambition and rest."
+    text = st.text_area("Use 'between X and Y'", value=default_text, height=90)
+    dual = detect_duality(text)
+    if dual:
+        st.success(f"Detected: **{dual[0]}** vs **{dual[1]}**")
+    else:
+        st.warning("No duality detected yet.")
 
-    user_text = st.text_input(
-        "Enter your duality (use 'between X and Y')",
-        value=examples[0] if ex_choice == "—" else ex_choice,
-        placeholder="I feel torn between A and B",
-        help="On mobile, type here, then tap the button below."
-    )
+    st.subheader("Model & Preset")
+    model = st.selectbox("Model", ["gray_scott", "gierer_meinhardt", "fhn"], index=0, format_func=lambda s: s.replace("_"," ").title())
+    preset = st.selectbox("Preset", ["auto", "stripes/spots", "oscillation/waves"], index=0)
 
-    st.markdown("**Preset**")
-    preset = st.radio(
-        "Choose a pattern tendency",
-        ["Stripes (classic)", "Spots (islands)"],
-        horizontal=True,
-        label_visibility="collapsed",
-    )
-
-    st.markdown("**Parameters**")
-    N = st.slider("Grid size (N×N)", 64, 192, 128, step=32)
+    st.subheader("Controls")
+    size = st.slider("Grid size (N×N)", 64, 192, 128, step=32)
     steps = st.slider("Simulation steps", 100, 1500, 600, step=50)
-    dt = st.select_slider("Time step (dt)", [0.5, 1.0, 1.5], value=1.0)
-    throttle = st.checkbox("Slow preview (throttle)", value=False, help="Adds tiny delays so you can watch it form.")
-    throttle_ms = 10 if throttle else 0
 
-    # 🌟 Mobile‑friendly explicit submit:
-    run_clicked = st.button("Run Simulation", use_container_width=True, type="primary")
+    with st.expander("Advanced"):
+        ensemble_on = st.checkbox("Ensemble (multi-seed) label", value=True)
+        seeds = st.slider("Ensemble seeds", 3, 9, 5, step=2, disabled=not ensemble_on)
+        sensitivity_on = st.checkbox("Sensitivity (Gray–Scott F,k)", value=False)
+        phase_on = st.checkbox("Phase scan (Gray–Scott F,k)", value=False)
+        throttle = st.checkbox("Slow preview (throttle)")
 
-with colR:
+    run = st.button("Run", type="primary", use_container_width=True)
+
+with right:
     st.subheader("Pattern")
     canvas = st.empty()
-    prog = st.progress(0, text="Waiting…")
+    prog = st.progress(0, text="Idle")
 
-# Handle click
-if run_clicked:
-    dual = detect_duality(user_text or "")
-    if not dual:
-        st.error("No duality detected. Try a phrase like “between focus and distraction”.")
-    else:
-        # choose preset
-        params = (stripe_params(size=N, dt=dt) if preset.startswith("Stripes")
-                  else spot_params(size=N, dt=dt))
-        # live progress callback
-        def on_progress(done, total, Vfield):
-            prog.progress(done / total, text=f"Simulating… {done}/{total}")
-            fig, ax = plt.subplots(figsize=(5.0, 5.0))
-            ax.imshow(Vfield, cmap="viridis")
-            ax.set_title(f"{dual[0]} vs {dual[1]} — step {done}/{total}")
-            ax.axis("off")
-            canvas.pyplot(fig, clear_figure=True)
-            plt.close(fig)
+def choose_params(model, preset, size):
+    if model == "gray_scott":
+        goal = "spots" if "spot" in preset else "stripes"
+        return gs_preset(goal=goal, size=size)
+    if model == "gierer_meinhardt":
+        return gm_preset(size=size)
+    if model == "fhn":
+        return fhn_preset(size=size)
+    raise ValueError("unknown model")
 
-        # run sim
-        U, V = simulate(params, steps=steps, progress_cb=on_progress, render_every=max(1, steps // 50), throttle_ms=throttle_ms)
-        prog.progress(1.0, text="Done ✓")
-        label = classify_pattern(V)
+if run and dual:
+    params = choose_params(model, preset, size)
+    def on_progress(done, total, field):
+        if throttle:
+            fig, ax = plt.subplots(figsize=(5,5))
+            ax.imshow(field, cmap="viridis"); ax.axis("off")
+            ax.set_title(f"{dual[0]} vs {dual[1]} — {done}/{total}")
+            canvas.pyplot(fig, clear_figure=True); plt.close(fig)
+        prog.progress(done/total, text=f"Simulating… {done}/{total}")
 
-        # Show downloads (PNG + JSON)
-        fig, ax = plt.subplots(figsize=(5.5, 5.5))
-        ax.imshow(V, cmap="viridis")
-        ax.set_title(f"Pattern: {dual[0]} vs {dual[1]}  ·  {label}")
-        ax.axis("off")
-        png_buf = io.BytesIO()
-        fig.savefig(png_buf, format="png", dpi=180, bbox_inches="tight", pad_inches=0)
-        png_buf.seek(0)
-        st.download_button("Download image (PNG)", data=png_buf, file_name="duality_pattern.png", mime="image/png")
-        plt.close(fig)
+    U, V, field_name = run_model(model, params, steps=steps, rng_seed=0, progress=on_progress, render_every=max(1, steps//50))
+    field = V if field_name == "V" else U
+    label = classify_pattern(field)
 
-        artifact = {
-            "input": user_text,
-            "duality": {"a": dual[0], "b": dual[1]},
-            "params": params,
-            "label": label,
-            "metrics": {"mean_abs_grad": float(np.mean(np.abs(np.gradient(V))))}
-        }
-        st.download_button("Download run as JSON", data=json.dumps(artifact, indent=2), file_name="run.json", mime="application/json")
+    conf = None; counts = None
+    if ensemble_on:
+        def sim_runner(p, steps=steps, rng_seed=0):
+            return run_model(model, p, steps=steps, rng_seed=rng_seed)
+        label, conf, counts = ensemble_label(sim_runner, params, steps=min(steps, 500), seeds=seeds)
 
-        # TREE block
-        st.subheader("🌳 TREE Insights")
-        tree = tree_response(dual, params, label)
-        st.markdown(f"**Translation** — {tree['translation']}")
-        st.markdown(f"**Recommendation** — {tree['recommendation']}")
-        st.markdown(f"**Explanation** — {tree['explanation']}")
-        st.markdown(f"**Experiment** — {tree['experiment']}")
+    fig, ax = plt.subplots(figsize=(5.5,5.5))
+    ax.imshow(field, cmap="viridis"); ax.axis("off")
+    title_lab = f"{dual[0]} vs {dual[1]} · {label}"
+    if conf is not None: title_lab += f" ({conf:.0%})"
+    ax.set_title(title_lab)
+    canvas.pyplot(fig, clear_figure=True); plt.close(fig)
+    prog.progress(1.0, text="Done ✓")
 
-        st.divider()
-        st.markdown("### 🧬 How it works")
-        st.markdown(
-            "We simulate a **Gray–Scott reaction–diffusion** system on an N×N grid. "
-            "With the chosen feed (F) and kill (k) rates, the two fields interact and diffuse to form "
-            "**stripes, spots, or labyrinths**. A tiny FFT heuristic labels the pattern."
-        )
+    buf = io.BytesIO()
+    fig2, ax2 = plt.subplots(figsize=(5.5,5.5)); ax2.imshow(field, cmap="viridis"); ax2.axis("off")
+    fig2.savefig(buf, format="png", dpi=180, bbox_inches="tight", pad_inches=0)
+    st.download_button("Download image (PNG)", data=buf.getvalue(), file_name="pattern.png", mime="image/png")
+    plt.close(fig2)
+
+    artifact = {"input": text, "duality": {"a": dual[0], "b": dual[1]}, "model": model, "params": params,
+                "label": label, "confidence": conf, "counts": counts,
+                "metrics": {"mean_abs_grad": float(np.mean(np.abs(np.gradient(field))))}}
+    st.download_button("Download run (JSON)", data=json.dumps(artifact, indent=2), file_name="run.json", mime="application/json")
+
+    st.subheader("🌳 TREE Insights")
+    tree = tree_response(dual, model, params, label, confidence=conf)
+    st.markdown(f"**Translation** — {tree['translation']}")
+    st.markdown(f"**Recommendation** — {tree['recommendation']}")
+    st.markdown(f"**Explanation** — {tree['explanation']}")
+    st.markdown(f"**Experiment** — {tree['experiment']}")
+
+    if sensitivity_on and model == "gray_scott":
+        st.divider(); st.markdown("### 🔎 Local sensitivity (F,k)")
+        def sim_runner(p, steps=steps, rng_seed=0):
+            return run_model(model, p, steps=steps, rng_seed=rng_seed)
+        out = local_sensitivity_gray_scott(sim_runner, params, steps=min(steps, 400))
+        st.table(out)
+
+    if phase_on and model == "gray_scott":
+        st.divider(); st.markdown("### 🗺️ Phase scan (F,k)")
+        F_list = np.linspace(max(0.01, params['F']-0.01), params['F']+0.01, 6)
+        k_list = np.linspace(max(0.03, params['k']-0.01), params['k']+0.01, 6)
+        def gs_runner(p, steps=250, rng_seed=0):
+            return run_model("gray_scott", p, steps=steps, rng_seed=rng_seed)
+        labels = phase_scan_gray_scott(gs_runner, params, F_list, k_list, steps=250)
+        fig3 = render_phase_heatmap(F_list, k_list, labels)
+        st.pyplot(fig3, use_container_width=True)
+
 else:
-    st.info("Type your sentence, adjust sliders if you like, then tap **Run Simulation**.")
+    st.info("Enter a duality, pick a model, and press **Run**.")
+
+st.markdown("---")
+st.markdown("This lab uses real PDEs and shows measured outcomes (labels, ensembles, sensitivity). No magic, just maths.")

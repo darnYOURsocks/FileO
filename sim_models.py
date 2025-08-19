@@ -1,3 +1,4 @@
+
 # sim_models.py — reaction–diffusion models: Gray–Scott, Gierer–Meinhardt, FitzHugh–Nagumo
 import numpy as np
 
@@ -54,26 +55,25 @@ def run_gierer_meinhardt(params, steps=800, rng_seed=0, progress=None, render_ev
     N = int(params.get("size", 128))
     Du = float(params.get("Du", 0.2))
     Dv = float(params.get("Dv", 0.1))
-    a  = float(params.get("a", 0.02))  # activator feed
-    b  = float(params.get("b", 0.0))   # inhibitor feed
+    a  = float(params.get("a", 0.02))
+    b  = float(params.get("b", 0.0))
     dt = float(params.get("dt", 0.2))
     eps = 1e-6
     U, V = init_fields(N, rng_seed=rng_seed, noise=0.01)
     for i in range(steps):
         Lu = laplacian(U); Lv = laplacian(V)
-        # u_t = Du∇²u + u^2/v - u + a ; v_t = Dv∇²v + u^2 - v + b
         uv = (U*U) / (V + eps)
         U += (Du*Lu + uv - U + a) * dt
         V += (Dv*Lv + U*U - V + b) * dt
         U = np.maximum(U, 0.0); V = np.maximum(V, 0.0)
         if progress and (render_every and (i % render_every==0 or i==steps-1)):
-            progress(i+1, steps, U)  # U shows spots nicely
+            progress(i+1, steps, U)
     return U, V, "U"
 
 def gm_preset(goal="spots", size=128, dt=0.2):
     return {"Du":0.2, "Dv":0.1, "a":0.02, "b":0.0, "dt":dt, "size":size}
 
-# ---------------- FitzHugh–Nagumo (simple RD) ----------------
+# ---------------- FitzHugh–Nagumo ----------------
 def run_fitzhugh_nagumo(params, steps=1200, rng_seed=0, progress=None, render_every=0):
     N = int(params.get("size", 128))
     Du = float(params.get("Du", 0.1))
@@ -88,8 +88,6 @@ def run_fitzhugh_nagumo(params, steps=1200, rng_seed=0, progress=None, render_ev
     V = 0.1 * (rng.random((N,N)) - 0.5)
     for i in range(steps):
         Lu = laplacian(U); Lv = laplacian(V)
-        # u_t = Du∇²u + u - u^3/3 - v + I
-        # v_t = Dv∇²v + eps*(u + a - b*v)
         U += (Du*Lu + U - (U**3)/3.0 - V + I) * dt
         V += (Dv*Lv + eps*(U + a - b*V)) * dt
         if progress and (render_every and (i % render_every==0 or i==steps-1)):
@@ -99,7 +97,6 @@ def run_fitzhugh_nagumo(params, steps=1200, rng_seed=0, progress=None, render_ev
 def fhn_preset(mode="oscillation", size=128, dt=0.2):
     return {"Du":0.1, "Dv":0.05, "a":0.7, "b":0.8, "eps":0.08, "I":0.0, "dt":dt, "size":size}
 
-# Unified runner
 def run_model(model, params, steps, rng_seed=0, progress=None, render_every=0):
     if model == "gray_scott":
         return run_gray_scott(params, steps=steps, rng_seed=rng_seed, progress=progress, render_every=render_every)
