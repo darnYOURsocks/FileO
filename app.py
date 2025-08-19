@@ -29,7 +29,7 @@ left, right = st.columns([1,1])
 with left:
     st.subheader("Input")
     default_text = "I feel torn between ambition and rest."
-    text = st.text_input()("Use 'between X and Y'", value=default_text, height=90)
+    text = st.text_area("Use 'between X and Y'", value=default_text, height=90)
     dual = detect_duality(text)
     if dual:
         st.success(f"Detected: **{dual[0]}** vs **{dual[1]}**")
